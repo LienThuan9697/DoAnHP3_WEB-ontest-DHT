@@ -1,0 +1,355 @@
+<?php
+
+use PhpOffice\PhpWord\Element\AbstractContainer;
+use PhpOffice\PhpWord\Element\Text;
+use PhpOffice\PhpWord\IOFactory as WordIOFactory;
+
+class Question extends Controller
+{
+    public $cauHoiModel;
+    public $cauTraLoiModel;
+
+    public function __construct()
+    {
+        $this->cauHoiModel = $this->model("CauHoiModel");
+        $this->cauTraLoiModel = $this->model("CauTraLoiModel");
+        parent::__construct();
+        require_once "./mvc/core/Pagination.php";
+    }
+
+    public function default()
+    {
+        if (AuthCore::checkPermission("cauhoi", "view")) {
+            $this->view("main_layout", [
+                "Page" => "question",
+                "Title" => "Câu hỏi",
+                "Plugin" => [
+                    "ckeditor" => 1,
+                    "select" => 1,
+                    "notify" => 1,
+                    "sweetalert2" => 1,
+                    "pagination" => [],
+                    "jquery-validate" => 1,
+                ],
+                "Script" => "question",
+                "user_id" => $_SESSION['user_id'],
+            ]);
+        } else {
+            $this->view("single_layout", ["Page" => "error/page_404","Title" => "Lỗi !"]);
+        }
+    }
+
+    public function xulyDocx()
+    {
+        if ($_SERVER["REQUEST_METHOD"] == "POST" && AuthCore::checkPermission("cauhoi", "create")) {
+            require_once 'vendor/autoload.php';
+            $filename = $_FILES["fileToUpload"]["tmp_name"];
+            $objReader = WordIOFactory::createReader('Word2007');
+            $phpWord = $objReader->load($filename);
+            $text = '';
+            // Lấy kí tự từng đoạn
+            function getWordText($element)
+            {
+                $result = '';
+                if ($element instanceof AbstractContainer) {
+                    foreach ($element->getElements() as $element) {
+                        $result .= getWordText($element);
+                    }
+                } elseif ($element instanceof Text) {
+                    $result .= $element->getText();
+                }
+                return $result;
+            }
+
+            foreach ($phpWord->getSections() as $section) {
+                foreach ($section->getElements() as $element) {
+                    $text .= trim(getWordText($element));
+                    $text .= "\\n";
+                }
+            }
+
+            $text = rtrim($text, "\\n");
+            substr($text, -1);
+            $questions = explode("\\n\\n", $text);
+            $arrques = array();
+            for ($i = 0; $i < count($questions); $i++) {
+                $data = explode("\\n", $questions[$i]);
+                $arrques[$i]['level'] = substr($data[0], 1, 1);
+                $arrques[$i]['question'] = substr(trim($data[0]), 4);
+                $arrques[$i]['answer'] = ord(trim(substr($data[count($data) - 1], 8))) - 65 + 1;
+                $arrques[$i]['option'] = array();
+                for ($j = 1; $j < count($data) - 1; $j++) {
+                    $arrques[$i]['option'][] = trim(substr($data[$j], 3));
+                }
+            }
+            echo json_encode($arrques);
+        }
+    }
+
+    public function addExcel()
+    {
+        if ($_SERVER["REQUEST_METHOD"] == "POST" && AuthCore::checkPermission("cauhoi", "create")) {
+            require_once 'vendor/autoload.php';
+            $inputFileName = $_FILES["fileToUpload"]["tmp_name"];
+            try {
+                $inputFileType = PHPExcel_IOFactory::identify($inputFileName);
+                $objReader = PHPExcel_IOFactory::createReader($inputFileType);
+                $objPHPExcel = $objReader->load($inputFileName);
+            } catch (Exception $e) {
+                die('Lỗi không thể đọc file "' . pathinfo($inputFileName, PATHINFO_BASENAME) . '": ' . $e->getMessage());
+            }
+            $sheet = $objPHPExcel->setActiveSheetIndex(0);
+            $Totalrow = $sheet->getHighestRow();
+            $LastColumn = $sheet->getHighestColumn();
+            $TotalCol = PHPExcel_Cell::columnIndexFromString($LastColumn);
+            $data = [];
+            for ($i = 2; $i <= $Totalrow; $i++) {
+                //----Lặp cột
+                for ($j = 0; $j < $TotalCol; $j++) {
+                    // Tiến hành lấy giá trị của từng ô đổ vào mảng
+                    $check = '';
+                    if ($j == 0) {
+                        $check = "level";
+                        $data[$i - 2][$check] = $sheet->getCellByColumnAndRow($j, $i)->getValue();
+                    } elseif ($j == 1) {
+                        $check = "question";
+                        $data[$i - 2][$check] = $sheet->getCellByColumnAndRow($j, $i)->getValue();
+                    } elseif ($j == $TotalCol - 1) {
+                        $check = "answer";
+                        $data[$i - 2][$check] = $sheet->getCellByColumnAndRow($j, $i)->getValue();
+                    } else {
+                        $check = "option";
+                        $data[$i - 2][$check][] = $sheet->getCellByColumnAndRow($j, $i)->getValue();
+                    }
+                }
+            }
+            echo json_encode($data);
+        }
+    }
+
+    public function addQues()
+    {
+        if (AuthCore::checkPermission("cauhoi", "create")) {
+            if ($_SERVER["REQUEST_METHOD"] == "POST") {
+                $mamon = $_POST['mamon'];
+                $machuong = $_POST['machuong'];
+                $dokho = $_POST['dokho'];
+                $noidung = strip_tags($_POST['noidung']);
+                $cautraloi_json = $_POST['cautraloi'];
+                $cautraloi = json_decode($cautraloi_json, true);
+                $nguoitao = $_SESSION['user_id'];
+
+                // Tạo câu hỏi và lấy mã câu hỏi mới
+                $macauhoi = $this->cauHoiModel->create($noidung, $dokho, $mamon, $machuong, $nguoitao);
+
+                if ($macauhoi) {
+                    // Tạo từng câu trả lời
+                    foreach ($cautraloi as $x) {
+                        $content = strip_tags($x['content']);
+                        $this->cauTraLoiModel->create($macauhoi, $content, $x['check'] == 'true' ? 1 : 0);
+                    }
+
+
+                    // Trả về phản hồi thành công
+                    echo json_encode([
+                        "status" => "success",
+                        "message" => "Thêm câu hỏi thành công",
+                        "macauhoi" => $macauhoi
+                    ]);
+                } else {
+                    // Thất bại khi thêm câu hỏi
+                    echo json_encode([
+                        "status" => "error",
+                        "message" => "Không thể thêm câu hỏi"
+                    ]);
+                }
+            }
+        }
+    }
+
+
+    public function addQuesFile()
+    {
+        if (AuthCore::checkPermission("cauhoi", "create")) {
+            if ($_SERVER["REQUEST_METHOD"] == "POST") {
+                $nguoitao = $_SESSION['user_id'];
+                $monhoc = $_POST['monhoc'];
+                $chuong = $_POST['chuong'];
+                $questions = $_POST["questions"];
+                foreach ($questions as $question) {
+                    $level = $question['level'];
+                    $noidung = $question['question'];
+                    $answer = $question['answer'];
+                    $options = $question['option'];
+                    $result = $this->cauHoiModel->create($noidung, $level, $monhoc, $chuong, $nguoitao);
+                    $macauhoi = mysqli_insert_id($result);
+                    $index = 1;
+                    foreach ($options as $option) {
+                        $check = 0;
+                        if ($index == $answer) {
+                            $check = 1;
+                        }
+                        $this->cauTraLoiModel->create($macauhoi, $option, $check);
+                        $index++;
+                    }
+                }
+            }
+        }
+    }
+
+
+    public function getQuestion()
+    {
+        if (AuthCore::checkPermission("cauhoi", "view")) {
+            if ($_SERVER['REQUEST_METHOD'] == 'GET') {
+                $result = $this->cauHoiModel->getAll();
+                echo json_encode($result);
+            }
+        }
+    }
+
+    public function delete()
+    {
+        if (AuthCore::checkPermission("cauhoi", "delete")) {
+            if ($_SERVER["REQUEST_METHOD"] == "POST") {
+                $id = $_POST['macauhoi'];
+                $this->cauHoiModel->delete($id);
+            }
+        }
+    }
+
+    public function getQuestionById()
+    {
+        if (AuthCore::checkPermission("cauhoi", "view")) {
+            if ($_SERVER["REQUEST_METHOD"] == "POST") {
+                $id = $_POST['id'];
+                $result = $this->cauHoiModel->getById($id);
+                echo json_encode($result);
+            }
+        }
+    }
+
+    public function getAnswerById()
+    {
+        if ($_SERVER["REQUEST_METHOD"] == "POST") {
+            $id = $_POST['id'];
+            $result = $this->cauTraLoiModel->getAll($id);
+            echo json_encode($result);
+        }
+    }
+
+    public function editQuesion()
+    {
+        if (!AuthCore::checkPermission("cauhoi", "update")) {
+            return;
+        }
+
+        if ($_SERVER["REQUEST_METHOD"] == "POST") {
+            $id         = $_POST['id'] ?? null;
+            $mamon      = $_POST['mamon'] ?? null;
+            $machuong   = $_POST['machuong'] ?? null;
+            $dokho      = $_POST['dokho'] ?? null;
+            $nguoitao   = $_SESSION['user_id'];
+            $noidungRaw = $_POST['noidung'] ?? '';
+            $cautraloi  = $_POST['cautraloi'] ?? [];
+
+            // Loại bỏ thẻ HTML trong nội dung câu hỏi
+            $noidung = trim(strip_tags($noidungRaw));
+
+            // Kiểm tra nội dung bắt buộc
+            if (!$id || !$mamon || !$machuong || !$dokho || $noidung === '' || empty($cautraloi)) {
+                return; // Không hợp lệ → không làm gì cả
+            }
+
+            // Kiểm tra từng đáp án hợp lệ
+            $validAnswers = [];
+            foreach ($cautraloi as $x) {
+                $content = trim(strip_tags($x['content'])); // Loại bỏ HTML
+                if ($content !== '') {
+                    $validAnswers[] = [
+                        'content' => $content,
+                        'check'   => $x['check'] === 'true' ? 1 : 0
+                    ];
+                }
+            }
+
+            if (count($validAnswers) === 0) {
+                return; // Không có đáp án hợp lệ → không lưu
+            }
+
+            // Cập nhật câu hỏi
+            $result = $this->cauHoiModel->update($id, $noidung, $dokho, $mamon, $machuong, $nguoitao);
+
+            if ($result) {
+                // Xoá đáp án cũ và thêm mới
+                $this->cauTraLoiModel->deletebyanswer($id);
+                foreach ($validAnswers as $ans) {
+                    $this->cauTraLoiModel->create($id, $ans['content'], $ans['check']);
+                }
+            }
+        }
+    }
+
+
+    public function getTotalPage()
+    {
+        AuthCore::checkAuthentication();
+        if ($_SERVER["REQUEST_METHOD"] == "POST") {
+            $content = $_POST['content'];
+            $select = $_POST['selected'];
+            echo $this->cauHoiModel->getTotalPage($content);
+        }
+    }
+
+    public function getQuestionBySubject()
+    {
+        AuthCore::checkAuthentication();
+        if ($_SERVER["REQUEST_METHOD"] == "POST") {
+            $mamonhoc = $_POST['mamonhoc'];
+            $machuong = $_POST['machuong'];
+            $dokho = $_POST['dokho'];
+            $content = $_POST['content'];
+            $page = $_POST['page'];
+            $result = $this->cauHoiModel->getQuestionBySubject($mamonhoc, $machuong, $dokho, $content, $page);
+            echo json_encode($result);
+        }
+    }
+
+    public function getTotalPageQuestionBySubject()
+    {
+        if ($_SERVER["REQUEST_METHOD"] == "POST") {
+            $mamonhoc = $_POST['mamonhoc'];
+            $machuong = $_POST['machuong'];
+            $dokho = $_POST['dokho'];
+            $content = $_POST['content'];
+            $result = $this->cauHoiModel->getTotalPageQuestionBySubject($mamonhoc, $machuong, $dokho, $content);
+            echo $result;
+        }
+    }
+
+    public function getQuery($filter, $input, $args)
+    {
+        $result = $this->cauHoiModel->getQuery($filter, $input, $args);
+        return $result;
+    }
+
+    public function getAnswersForMultipleQuestions()
+    {
+        if ($_SERVER["REQUEST_METHOD"] == "POST") {
+            $arr_question_id = $_POST['questions'];
+            $result = $this->cauTraLoiModel->getAnswersForMultipleQuestions($arr_question_id);
+            echo json_encode($result);
+        }
+    }
+
+    public function getsoluongcauhoi()
+    {
+        if ($_SERVER["REQUEST_METHOD"] == "POST") {
+            $chuong = isset($_POST['chuong']) ? $_POST['chuong'] : array();
+            $monhoc = $_POST['monhoc'];
+            $dokho = $_POST['dokho'];
+            $result = $this->cauHoiModel->getsoluongcauhoi($chuong, $monhoc, $dokho);
+            echo $result;
+        }
+    }
+}
